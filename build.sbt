@@ -24,7 +24,7 @@ ciRelease := {
 val versions = new {
   val scala212 = "2.12.20"
   val scala213 = "2.13.16"
-  val scala3 = "3.3.5"
+  val scala3 = "3.3.6"
 
   // Which versions should be cross-compiled for publishing
   val scalas = List(scala212, scala213, scala3)
@@ -51,7 +51,7 @@ val only1VersionInIDE =
       _.settings(
         ideSkipProject := (scalaVersion.value != versions.ideScala),
         bspEnabled := (scalaVersion.value == versions.ideScala),
-        scalafmtOnCompile := !isCI
+        scalafmtOnCompile := false // !isCI
       )
     ) +:
     versions.platforms.filter(_ != versions.idePlatform).map { platform =>
@@ -69,6 +69,52 @@ val addScala213plusDir =
         Test / unmanagedSourceDirectories += sourceDirectory.value.toPath.resolve("test/scala-2.13+").toFile
       )
     )
+
+val defineCrossQuotes = versions.scalas.flatMap { scalaVersion =>
+  if (scalaVersion == versions.scala3) {
+    List(
+      MatrixAction {
+        case (version, List(VirtualAxis.js))     => version.isScala3
+        case (version, List(VirtualAxis.native)) => version.isScala3
+        case _                                   => false
+      }.Skip
+    )
+  } else {
+    List.empty
+  }
+}
+
+val useCrossQuotes = versions.scalas.flatMap { scalaVersion =>
+  if (scalaVersion == versions.scala3) {
+    List(
+      MatrixAction
+        .ForScala(v => v.value == scalaVersion)
+        .Configure(
+          _.settings(
+            scalacOptions ++= {
+              val jar = (hearthCrossQuotes.jvm(scalaVersion) / Compile / packageBin).value
+              Seq(s"-Xplugin:${jar.getAbsolutePath}", s"-Jdummy=${jar.lastModified}") // ensures recompilation
+            }
+          )
+        )
+    )
+  } else {
+    List(
+      MatrixAction {
+        case (version, List(VirtualAxis.jvm)) => version.value == scalaVersion
+        case _                                => false
+      }.Configure(_.dependsOn(hearthCrossQuotes.jvm(scalaVersion))),
+      MatrixAction {
+        case (version, List(VirtualAxis.js)) => version.value == scalaVersion
+        case _                               => false
+      }.Configure(_.dependsOn(hearthCrossQuotes.js(scalaVersion))),
+      MatrixAction {
+        case (version, List(VirtualAxis.native)) => version.value == scalaVersion
+        case _                                   => false
+      }.Configure(_.dependsOn(hearthCrossQuotes.native(scalaVersion)))
+    )
+  }
+}
 
 val settings = Seq(
   git.useGitDescribe := true,
@@ -281,19 +327,19 @@ val publishSettings = Seq(
 val mimaSettings = Seq(
   mimaPreviousArtifacts := {
     val previousVersions = moduleName.value match {
-      case "hearth" | "hearth-compat" | "hearth-micro-fp" => Set() // add after RC-1 publish
+      case "hearth-cross-quotes" | "hearth-compat" | "hearth-micro-fp" | "hearth" => Set() // add after RC-1 publish
       case "hearth-tests" | "hearth-sandwich-examples-213" | "hearth-sandwich-examples-3" | "hearth-sandwich-tests" =>
         Set()
-      case _ => ??? // examplicitly add case
+      case name => sys.error(s"All modules should be explicitly checked or ignored for MiMa, missing: $name")
     }
     previousVersions.map(organization.value %% moduleName.value % _)
   },
   mimaFailOnNoPrevious := {
     moduleName.value match {
-      case "hearth" | "hearth-compat" | "hearth-micro-fp" => false // add after RC-1 publish
+      case "hearth-cross-quotes" | "hearth-compat" | "hearth-micro-fp" | "hearth" => false // add after RC-1 publish
       case "hearth-tests" | "hearth-sandwich-examples-213" | "hearth-sandwich-examples-3" | "hearth-sandwich-tests" =>
         false
-      case _ => ??? // examplicitly add case
+      case name => sys.error(s"All modules should be explicitly checked or ignored for MiMa, missing: $name")
     }
   }
 )
@@ -343,7 +389,7 @@ val al = new {
   val publishLocalForTests = (publishLocal("JVM", "") ++ publishLocal("JVM", "3")).mkString(" ; ")
 }
 
-// modules
+// Modules
 
 lazy val root = project
   .in(file("."))
@@ -351,6 +397,7 @@ lazy val root = project
   .settings(settings)
   .settings(publishSettings)
   .settings(noPublishSettings)
+  .aggregate(hearthCrossQuotes.projectRefs *)
   .aggregate(hearthCompat.projectRefs *)
   .aggregate(hearthMicroFp.projectRefs *)
   .aggregate(hearth.projectRefs *)
@@ -413,6 +460,28 @@ lazy val root = project
     )
   )
 
+lazy val hearthCrossQuotes = projectMatrix
+  .in(file("hearth-cross-quotes"))
+  // TODO: cross-compile plugins for various Scala 2 versions
+  .someVariations(versions.scalas, versions.platforms)((defineCrossQuotes ++ only1VersionInIDE) *)
+  .enablePlugins(GitVersioning, GitBranchPrompt)
+  .disablePlugins(WelcomePlugin, MimaPlugin)
+  .settings(
+    moduleName := "hearth-cross-quotes",
+    name := "hearth-cross-quotes",
+    description := "Utilities for hurting little kittens",
+    libraryDependencies ++= {
+      CrossVersion.partialVersion(scalaVersion.value) match {
+        case Some((3, _)) => Seq("org.scala-lang" %% "scala3-compiler" % scalaVersion.value)
+        case Some((2, _)) => Seq("org.scala-lang" % "scala-compiler" % scalaVersion.value)
+        case _            => ???
+      }
+    }
+  )
+  .settings(settings *)
+  .settings(versionSchemeSettings *)
+  .settings(publishSettings *)
+
 lazy val hearthCompat = projectMatrix
   .in(file("hearth-compat"))
   .someVariations(versions.scalas, versions.platforms)((addScala213plusDir +: only1VersionInIDE) *)
@@ -448,7 +517,7 @@ lazy val hearthMicroFp = projectMatrix
 
 lazy val hearth = projectMatrix
   .in(file("hearth"))
-  .someVariations(versions.scalas, versions.platforms)((addScala213plusDir +: only1VersionInIDE) *)
+  .someVariations(versions.scalas, versions.platforms)((addScala213plusDir +: (only1VersionInIDE ++ useCrossQuotes)) *)
   .enablePlugins(GitVersioning, GitBranchPrompt)
   .disablePlugins(WelcomePlugin)
   .settings(
@@ -468,7 +537,7 @@ lazy val hearth = projectMatrix
 
 lazy val hearthTests = projectMatrix
   .in(file("hearth-tests"))
-  .someVariations(versions.scalas, versions.platforms)((addScala213plusDir +: only1VersionInIDE) *)
+  .someVariations(versions.scalas, versions.platforms)((addScala213plusDir +: (only1VersionInIDE ++ useCrossQuotes)) *)
   .enablePlugins(GitVersioning, GitBranchPrompt)
   .disablePlugins(WelcomePlugin)
   .settings(
@@ -527,3 +596,10 @@ lazy val hearthSandwichTests = projectMatrix
   .dependsOn(hearth % s"$Test->$Test;$Compile->$Compile")
   .dependsOn(hearthSandwichExamples213 % s"$Test->$Test;$Compile->$Compile")
   .dependsOn(hearthSandwichExamples3 % s"$Test->$Test;$Compile->$Compile")
+  .settings(dependencies *)
+  .dependsOn(hearth)
+
+//when having memory/GC-related errors during build, uncommenting this may be useful:
+Global / concurrentRestrictions := Seq(
+  Tags.limit(Tags.Compile, 2) // only 2 compilations at once
+)

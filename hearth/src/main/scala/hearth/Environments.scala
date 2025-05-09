@@ -67,4 +67,21 @@ trait Environments {
     private val fileLineRegex = """^(.+):(\d+)$""".r
     private val fileLineColumnRegex = """^(.+):(\d+):(\d+)$""".r
   }
+
+  val CrossQuotes: CrossQuotesModule
+  trait CrossQuotesModule { this: CrossQuotes.type =>
+
+    /** `scala.reflect.macros.blackbox.Context` on Scala 2, `scala.quoted.Quotes` on Scala 3. */
+    def ctx[CastAs]: CastAs
+
+    /** Let us infer inner `A` in `Expr[A]` at compilation phase where we only know outer types. */
+    final def castK[F[_], G[_]]: Cast[F, G] = CastImpl.asInstanceOf[Cast[F, G]]
+
+    sealed trait Cast[F[_], G[_]] {
+      def apply[A](fa: F[A]): G[A]
+    }
+    private object CastImpl extends Cast[fp.Id, fp.Id] {
+      def apply[A](fa: A): A = fa
+    }
+  }
 }

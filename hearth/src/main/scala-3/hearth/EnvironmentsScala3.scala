@@ -28,4 +28,9 @@ trait EnvironmentsScala3 extends Environments { this: MacroCommonsScala3 =>
     override def reportWarn(msg: String): Unit = report.info(msg, currentPosition)
     override def reportErrorAndAbort(msg: String): Nothing = report.errorAndAbort(msg, currentPosition)
   }
+
+  object CrossQuotes extends CrossQuotesModule {
+
+    override def ctx[CastAs]: CastAs = quotes.asInstanceOf[CastAs]
+  }
 }

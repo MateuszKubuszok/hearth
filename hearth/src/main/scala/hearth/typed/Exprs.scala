@@ -6,13 +6,13 @@ import hearth.fp.syntax.*
 
 import scala.language.implicitConversions
 
-trait Exprs { this: MacroCommons =>
+trait Exprs extends ExprsCrossQuotes { this: MacroCommons =>
 
   /** Platform-specific untyped type representation (`c.Expr[A]` in 2, `scala.quoted.Expr[A]` in 3) */
   type Expr[A]
 
   val Expr: ExprModule
-  trait ExprModule { this: Expr.type =>
+  trait ExprModule extends ExprCrossQuotes { this: Expr.type =>
 
     def apply[A: ExprCodec](value: A): Expr[A] = ExprCodec[A].toExpr(value)
 
