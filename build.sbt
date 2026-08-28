@@ -4,9 +4,7 @@ import kubuszok.sbt._
 import kubuszok.sbt.KubuszokPlugin.autoImport._
 import com.typesafe.tools.mima.core._
 import com.typesafe.tools.mima.core.ProblemFilters._
-
-// Used to compile tests against the newest Scala versions, to check for regressions.
-lazy val isNewestScalaTests = sys.env.get("NEWEST_SCALA_TESTS").contains("true")
+import PipeOps._
 
 // Versions:
 
@@ -15,9 +13,10 @@ val versions = new {
   val scala213 = "2.13.16"
   val scala3 = "3.3.8"
 
-  // Versions we can compile tests against if needed, to check for regressions.
-  val scala213Newest = "2.13.18"
-  val scala3Newest = "3.8.4"
+  // Regression test versions (always-visible tier rows, not env-var-controlled).
+  val scala213NextLts = "2.13.18"
+  val scala3NextLts = "3.9.0"
+  val scala3Next = "3.10.0-RC1"
 
   // Which versions should be cross-compiled for publishing.
   val scalas = List(scala213, scala3)
@@ -29,6 +28,23 @@ val versions = new {
   val scalacheck = "1.19.0"
   val scalaXml = "2.4.0"
 }
+
+// Scala 3 is the default axis (no suffix in project IDs). Scala 2.13 gets the "2" suffix.
+val scala3DefaultAxes: Seq[VirtualAxis] = Seq(VirtualAxis.jvm, VirtualAxis.scalaABIVersion("3.0.0"))
+
+// Scala 2 axis with short "2" suffix (someVariations would produce "2_13" from the binary version).
+val scala2Axis: VirtualAxis.ScalaVersionAxis = VirtualAxis.scalaVersionAxis(versions.scala213, "2")
+
+// Tier axes for regression testing. Test modules declare these alongside the LTS scalaVersion axis,
+// then override scalaVersion to the regression version in their row's configure callback.
+val tierNextLts = ScalaTierAxis("NextLts", "next-lts")
+val tierNext = ScalaTierAxis("Next", "next")
+
+// Version-range helpers for scalacOptions.
+def scala3Minor(sv: String): Option[Int] =
+  if (sv.startsWith("3.")) Some(sv.stripPrefix("3.").takeWhile(_.isDigit).toInt) else None
+def isScala3RequiresJdk17(sv: String): Boolean = scala3Minor(sv).exists(_ >= 8)
+def isScala3PostLts(sv: String): Boolean = scala3Minor(sv).exists(_ >= 5)
 
 // Development settings:
 
@@ -47,6 +63,13 @@ val only1VersionInIDE = dev.only1VersionInIDE :+ MatrixAction
     )
   )
 
+// IDE skip predicate for Scala 2 rows.
+val scala2IdeSkip: String => Boolean = {
+  val ideScala = dev.props.getProperty("ide.scala", "3")
+  val idePlatform = dev.props.getProperty("ide.platform", "jvm")
+  platform => ideScala != "2.13" || idePlatform != platform
+}
+
 val logCrossQuotes =
   dev.props.getProperty("log.cross-quotes") match {
     case "true"                          => true
@@ -61,185 +84,151 @@ val logCrossQuotes =
 // and Scala.js 1.21.0 dependency (it requires 2.13.17)
 Global / allowUnsafeScalaLibUpgrade := true
 
-// The hearth-cross-quotes:
-//  - on Scala 2 are macros (defined for all platforms)
-//  - and on Scala 3 are plugins (defined only for JVM).
-val defineCrossQuotes = versions.scalas.flatMap(
-  foldVersion(_)(
-    // Scala 2: no skipping, we are defining projects for all platforms
-    for2_13 = List.empty,
-    // Scala 3: skip for JS and Native, we are defining projects only for JVM
-    for3 = List(
-      MatrixAction {
-        case (version, List(VirtualAxis.js))     => version.isScala3
-        case (version, List(VirtualAxis.native)) => version.isScala3
-        case _                                   => false
-      }.Skip
-    )
-  )
+// The hearth-cross-quotes on Scala 3 are plugins (JVM-only). Scala 2 cross-quotes are macros
+// (all platforms) — wired manually in each module's scala2Rows configure callback.
+val defineCrossQuotes = List(
+  MatrixAction {
+    case (version, List(VirtualAxis.js))     => version.isScala3
+    case (version, List(VirtualAxis.native)) => version.isScala3
+    case _                                   => false
+  }.Skip
 )
 
-// The hearth-cross-quotes:
-//  - on Scala 2 are macros (defined for all platforms)
-//  - and on Scala 3 are plugins (defined only for JVM).
-val useCrossQuotes = versions.scalas.flatMap { scalaVersion =>
-  foldVersion(scalaVersion)(
-    for2_13 = List(
-      // Enable logging from cross-quotes.
-      MatrixAction
-        .ForScala(_.isScala2)
-        .Configure(_.settings(scalacOptions += s"-Xmacro-settings:hearth.cross-quotes.logging=$logCrossQuotes")),
-      // Depends on cross-quotes specific for the platform.
-      MatrixAction {
-        case (version, List(VirtualAxis.jvm)) => version.isScala2
-        case _                                => false
-      }.Configure(_.dependsOn(hearthCrossQuotes.jvm(scalaVersion))),
-      MatrixAction {
-        case (version, List(VirtualAxis.js)) => version.isScala2
-        case _                               => false
-      }.Configure(_.dependsOn(hearthCrossQuotes.js(scalaVersion))),
-      MatrixAction {
-        case (version, List(VirtualAxis.native)) => version.isScala2
-        case _                                   => false
-      }.Configure(_.dependsOn(hearthCrossQuotes.native(scalaVersion)))
-    ),
-    for3 = List(
-      MatrixAction
-        .ForScala(_.isScala3)
-        .Configure(
-          _.settings(
-            scalacOptions ++= {
-              val jar = (hearthCrossQuotes.jvm(scalaVersion) / Compile / packageBin).value
-              Seq(
-                // Add the cross-quotes compiler plugin - the same for all platforms.
-                s"-Xplugin:${jar.getAbsolutePath}",
-                // Ensures recompilation.
-                s"-Jdummy=${jar.lastModified}",
-                // Enable logging from cross-quotes.
-                s"-P:hearth.cross-quotes:logging=$logCrossQuotes"
-              )
-            }
+// Cross-quotes Scala 3 compiler plugin wiring (someVariations only handles Scala 3 now).
+val useCrossQuotes = List(
+  MatrixAction
+    .ForScala(_.isScala3)
+    .Configure(
+      _.settings(
+        scalacOptions ++= {
+          val jar = (hearthCrossQuotes.jvm(versions.scala3) / Compile / packageBin).value
+          Seq(
+            s"-Xplugin:${jar.getAbsolutePath}",
+            s"-Jdummy=${jar.lastModified}",
+            s"-P:hearth.cross-quotes:logging=$logCrossQuotes"
           )
-        )
+        }
+      )
     )
-  )
-}
+)
+
+// Scala 2 cross-quotes wiring per platform (passed to scala2Rows configure callbacks).
+def scala2CqJvm(p: Project): Project =
+  p.dependsOn(hearthCrossQuotes.jvm(versions.scala213))
+   .settings(scalacOptions += s"-Xmacro-settings:hearth.cross-quotes.logging=$logCrossQuotes")
+def scala2CqJs(p: Project): Project =
+  p.dependsOn(hearthCrossQuotes.js(versions.scala213))
+   .settings(scalacOptions += s"-Xmacro-settings:hearth.cross-quotes.logging=$logCrossQuotes")
+def scala2CqNative(p: Project): Project =
+  p.dependsOn(hearthCrossQuotes.native(versions.scala213))
+   .settings(scalacOptions += s"-Xmacro-settings:hearth.cross-quotes.logging=$logCrossQuotes")
 
 val settings = Seq(
-  scalacOptions ++= foldVersion(scalaVersion.value)(
-    for3 = Seq(
-      // format: off
-      "-encoding", "UTF-8",
-      "-release", if (scalaVersion.value == versions.scala3Newest) "17" else "11", // Scala 3.8+ requires JDK 17+
-      // format: on
-    ) ++ (if (scalaVersion.value != versions.scala3Newest) Seq("-rewrite", "-source", "3.3-migration")
-          else Seq()) ++ Seq(
-      "-unchecked",
-      "-deprecation",
-      "-explain",
-      "-explain-cyclic",
-      "-explain-types",
-      "-feature",
-      "-no-indent",
-      "-Wconf:msg=Unreachable case:s", // suppress fake (?) errors in internal.compiletime
-      "-Wconf:msg=Missing symbol position:s", // suppress warning https://github.com/scala/scala3/issues/21672
-      "-Wconf:msg=should be provided with a .using. clause:s", // suppress migration warning after removing -source 3.3-migration
-      "-Wconf:msg=with as a type operator has been deprecated:s", // suppress migration warning after removing -source 3.3-migration
-      "-Wnonunit-statement",
-      // "-Wunused:imports", // import x.Underlying as X is marked as unused even though it is! probably one of https://github.com/scala/scala3/issues/: #18564, #19252, #19657, #19912
-      "-Wunused:privates",
-      "-Wunused:locals",
-      "-Wunused:explicits",
-      "-Wunused:implicits",
-      "-Wunused:params",
-      "-Wvalue-discard",
-      "-Werror",
-      "-Xcheck-macros"
-    ) ++ (if (scalaVersion.value == versions.scala3Newest) Seq("-Xkind-projector:underscores")
-          else Seq("-Ykind-projector:underscores")),
-    for2_13 = Seq(
-      // format: off
-      "-encoding", "UTF-8",
-      "-release", "11",
-      // format: on
-      "-unchecked",
-      "-deprecation",
-      "-explaintypes",
-      "-feature",
-      "-language:higherKinds",
-      "-Wconf:cat=scala3-migration:s", // silence mainly issues with -Xsource:3 and private case class constructors
-      "-Wconf:cat=deprecation&origin=hearth.*:s", // we want to be able to deprecate APIs and test them while they're deprecated
-      "-Wconf:msg=The outer reference in this type test cannot be checked at run time:s", // suppress fake(?) errors in internal.compiletime (adding origin breaks this suppression)
-      "-Wconf:msg=discarding unmoored doc comment:s", // silence errors when scaladoc cannot comprehend nested vals
-      "-Wconf:msg=Could not find any member to link for:s", // since errors when scaladoc cannot link to stdlib types or nested types
-      "-Wconf:msg=Variable .+ undefined in comment for:s", // silence errors when there we're showing a buggy Expr in scaladoc comment
-      "-Wunused:patvars",
-      "-Xfatal-warnings",
-      "-Xlint:adapted-args",
-      "-Xlint:delayedinit-select",
-      "-Xlint:doc-detached",
-      "-Xlint:inaccessible",
-      "-Xlint:infer-any",
-      "-Xlint:nullary-unit",
-      "-Xlint:option-implicit",
-      "-Xlint:package-object-classes",
-      "-Xlint:poly-implicit-overload",
-      "-Xlint:private-shadow",
-      "-Xlint:stars-align",
-      "-Xlint:type-parameter-shadow",
-      "-Xsource:3",
-      "-Yrangepos",
-      "-Ywarn-dead-code",
-      "-Ywarn-numeric-widen",
-      "-Ywarn-unused:locals",
-      "-Ywarn-unused:imports",
-      "-Ywarn-macros:after",
-      "-Ytasty-reader"
-    ) ++
-      (if (scalaVersion.value == versions.scala213Newest)
-         Seq(
-           "-Wconf:msg=a type was inferred to be kind-polymorphic `Nothing` to conform to:s", // silence warn that appeared after updating to Scala 2.13.17
-           "-Xsource-features:eta-expand-always" // silence warn that appears since 2.13.17
-         )
-       else Seq.empty)
-  )
+  scalacOptions ++= {
+    val sv = scalaVersion.value
+    foldVersion(sv)(
+      for3 = Seq(
+        // format: off
+        "-encoding", "UTF-8",
+        "-release", if (isScala3RequiresJdk17(sv)) "17" else "11",
+        // format: on
+      ) ++ (if (sv == versions.scala3) Seq("-rewrite", "-source", "3.3-migration")
+            else Seq()) ++ Seq(
+        "-unchecked",
+        "-deprecation",
+        "-explain",
+        "-explain-cyclic",
+        "-explain-types",
+        "-feature",
+        "-no-indent",
+        "-Wconf:msg=Unreachable case:s",
+        "-Wconf:msg=Missing symbol position:s",
+        "-Wconf:msg=should be provided with a .using. clause:s",
+        "-Wconf:msg=with as a type operator has been deprecated:s",
+        "-Wnonunit-statement",
+        "-Wunused:privates",
+        "-Wunused:locals",
+        "-Wunused:explicits",
+        "-Wunused:implicits",
+        "-Wunused:params",
+        "-Wvalue-discard",
+        "-Werror",
+        "-Xcheck-macros"
+      ) ++ (if (isScala3PostLts(sv)) Seq("-Xkind-projector:underscores")
+            else Seq("-Ykind-projector:underscores")),
+      for2_13 = Seq(
+        // format: off
+        "-encoding", "UTF-8",
+        "-release", "11",
+        // format: on
+        "-unchecked",
+        "-deprecation",
+        "-explaintypes",
+        "-feature",
+        "-language:higherKinds",
+        "-Wconf:cat=scala3-migration:s",
+        "-Wconf:cat=deprecation&origin=hearth.*:s",
+        "-Wconf:msg=The outer reference in this type test cannot be checked at run time:s",
+        "-Wconf:msg=discarding unmoored doc comment:s",
+        "-Wconf:msg=Could not find any member to link for:s",
+        "-Wconf:msg=Variable .+ undefined in comment for:s",
+        "-Wunused:patvars",
+        "-Xfatal-warnings",
+        "-Xlint:adapted-args",
+        "-Xlint:delayedinit-select",
+        "-Xlint:doc-detached",
+        "-Xlint:inaccessible",
+        "-Xlint:infer-any",
+        "-Xlint:nullary-unit",
+        "-Xlint:option-implicit",
+        "-Xlint:package-object-classes",
+        "-Xlint:poly-implicit-overload",
+        "-Xlint:private-shadow",
+        "-Xlint:stars-align",
+        "-Xlint:type-parameter-shadow",
+        "-Xsource:3",
+        "-Yrangepos",
+        "-Ywarn-dead-code",
+        "-Ywarn-numeric-widen",
+        "-Ywarn-unused:locals",
+        "-Ywarn-unused:imports",
+        "-Ywarn-macros:after",
+        "-Ytasty-reader"
+      ) ++
+        (if (sv == versions.scala213NextLts)
+           Seq(
+             "-Wconf:msg=a type was inferred to be kind-polymorphic `Nothing` to conform to:s",
+             "-Xsource-features:eta-expand-always"
+           )
+         else Seq.empty)
+    )
+  }
 )
 
 val jvmOnlySettings = Seq(
   scalacOptions ++= { if (scalaVersion.value == versions.scala3) Seq("-Yfuture-lazy-vals") else Seq.empty }
 )
 
-val scalaNewestSettings = Seq(
-  // Sets the Scala version to the newest supported version for the current platform.
-  scalaVersion := {
-    scalaVersion.value match {
-      case versions.scala213 if isNewestScalaTests => versions.scala213Newest
-      case versions.scala3 if isNewestScalaTests   => versions.scala3Newest
-      case current                                 => current
+// Source directory settings for each test tier. LTS rows include scala-lts* dirs (shared with Next-LTS).
+// Next-LTS rows additionally include scala-next-lts* dirs. Next rows include scala-next* dirs only.
+def tierSourceDirs(tiers: String*): Seq[Setting[_]] = {
+  def resolveDirs(srcDir: java.nio.file.Path, scope: String, sv: String): Seq[File] =
+    tiers.flatMap { tier =>
+      Seq(srcDir.resolve(s"$scope/scala-$tier").toFile) ++
+        foldVersion(sv)(
+          for3 = Seq(srcDir.resolve(s"$scope/scala-$tier-3").toFile),
+          for2_13 = Seq(srcDir.resolve(s"$scope/scala-$tier-2").toFile)
+        )
     }
-  },
-  // Adds directories with sources that should only be tested with the newest Scala version.
-  Compile / unmanagedSourceDirectories ++= {
-    if (isNewestScalaTests) {
-      val srcDir = sourceDirectory.value.toPath
-      Seq(srcDir.resolve("main/scala-newest").toFile) ++
-        foldVersion(scalaVersion.value)(
-          for3 = Seq(srcDir.resolve("main/scala-newest-3").toFile),
-          for2_13 = Seq(srcDir.resolve("main/scala-newest-2").toFile)
-        )
-    } else Seq.empty
-  },
-  Test / unmanagedSourceDirectories ++= {
-    if (isNewestScalaTests) {
-      val srcDir = sourceDirectory.value.toPath
-      Seq(srcDir.resolve("test/scala-newest").toFile) ++
-        foldVersion(scalaVersion.value)(
-          for3 = Seq(srcDir.resolve("test/scala-newest-3").toFile),
-          for2_13 = Seq(srcDir.resolve("test/scala-newest-2").toFile)
-        )
-    } else Seq.empty
-  }
-)
+  Seq(
+    Compile / unmanagedSourceDirectories ++= resolveDirs(sourceDirectory.value.toPath, "main", scalaVersion.value),
+    Test / unmanagedSourceDirectories ++= resolveDirs(sourceDirectory.value.toPath, "test", scalaVersion.value)
+  )
+}
+
+val ltsSourceDirs: Seq[Setting[_]] = tierSourceDirs("lts")
+val nextLtsSourceDirs: Seq[Setting[_]] = tierSourceDirs("lts", "next-lts")
+val nextSourceDirs: Seq[Setting[_]] = tierSourceDirs("next")
 
 val dependencies = Seq(
   libraryDependencies ++= Seq(
@@ -440,15 +429,19 @@ lazy val root = (project in file("."))
     description := "Build setup for Hearth modules",
     logo :=
       s"""Hearth ${(version).value} build for (${versions.scala213}, ${versions.scala3}) x (Scala JVM, Scala.js $scalaJSVersion, Scala Native $nativeVersion)
-         |${if (isNewestScalaTests)
-          s" - Testing against Scala ${versions.scala213Newest} and ${versions.scala3Newest} for forward compatibility and newest features support\n"
-        else ""}
-         |This build uses sbt-projectmatrix with sbt-commdmatrix helper:
-         | - Scala JVM adds no suffix to a project name seen in build.sbt
-         | - Scala.js adds the "JS" suffix to a project name seen in build.sbt
-         | - Scala Native adds the "Native" suffix to a project name seen in build.sbt
-         | - Scala 2.13 adds no suffix to a project name seen in build.sbt
-         | - Scala 3 adds the suffix "3" to a project name seen in build.sbt
+         | - Regression tiers: Next-LTS (${versions.scala213NextLts} / ${versions.scala3NextLts}), Next (${versions.scala3Next})
+         |
+         |This build uses sbt-projectmatrix with sbt-commandmatrix helper:
+         | - Scala 3 is the default (no suffix in project names)
+         | - Scala 2.13 adds the "2" suffix
+         | - Scala.js adds the "JS" suffix, Scala Native adds "Native"
+         |
+         |Test source directory tiers (in hearth-tests):
+         | - scala/, scala-2/, scala-3/                             — all versions (must compile everywhere)
+         | - scala-lts/, scala-lts-2/, scala-lts-3/                 — LTS + Next-LTS only (2.13.16+, and 3.3+, not 3.10+ - test code that cross compile on 2.13, and 3.3-3.9)
+         | - scala-next-lts/, scala-next-lts-2/, scala-next-lts-3/  — Next-LTS only (2.13.18+, and 3.9 - test code that would work only at later versios that lowest supported, but wasn't deprecated by 3.10)
+         | - scala-next/, scala-next-3/                             — Next only (3.10+ - test code that works at 3.10+, and contains no features deprecated by 3.10 or later)
+         |The goal is to publish for the lowest supported Scala versions, but make sure that the code works on all the following Scala versions, even if e.g. some of syntax would become deprecated by later versions.
          |
          |When working with IntelliJ or Scala Metals, edit dev.properties to control which Scala version you're currently working with.
          |
@@ -467,20 +460,38 @@ lazy val root = (project in file("."))
           "Publishes all Scala 2.13 and Scala 3 JVM artifacts to test snippets in documentation"
         ).alias("publish-local-for-tests"),
         UsefulTask(
-          "hearthTests/test ; hearthTests3/test ; hearthSandwichTests/test ; hearthSandwichTests3/test",
-          "Quickly run JVM on all platforms"
+          "hearthTests/test ; hearthTests2/test ; hearthSandwichTests/test ; hearthSandwichTests2/test",
+          "Quickly run LTS JVM tests"
         ).alias("quick-test"),
         UsefulTask(
-          "hearthTests/clean ; hearthTests3/clean ; hearthSandwichTests/clean ; hearthSandwichTests3/clean",
-          "Quickly clean JVM tests on all platforms (useful to force-recompile macros)"
-        ).alias("quick-clean")
+          "hearthTests/clean ; hearthTests2/clean ; hearthSandwichTests/clean ; hearthSandwichTests2/clean",
+          "Quickly clean LTS JVM tests (useful to force-recompile macros)"
+        ).alias("quick-clean"),
+        UsefulTask(
+          "hearthTestsNextLts/test ; hearthTests2NextLts/test ; hearthSandwichTestsNextLts/test",
+          "Quickly run Next-LTS (regression) JVM tests"
+        ).alias("quick-test-next-lts"),
+        UsefulTask(
+          "hearthTestsNextLts/clean ; hearthTests2NextLts/clean ; hearthSandwichTestsNextLts/clean",
+          "Quickly clean Next-LTS JVM tests"
+        ).alias("quick-clean-next-lts"),
+        UsefulTask(
+          "hearthTestsNext/test",
+          "Quickly run Next (forward) JVM tests"
+        ).alias("quick-test-next"),
+        UsefulTask(
+          "hearthTestsNext/clean",
+          "Quickly clean Next JVM tests"
+        ).alias("quick-clean-next")
       )
     )
   )
 
 lazy val hearthBetterPrinters = projectMatrix
   .in(file("hearth-better-printers"))
-  .someVariations(versions.scalas, versions.platforms)(only1VersionInIDE *)
+  .defaultAxes(scala3DefaultAxes: _*)
+  .someVariations(List(versions.scala3), versions.platforms)(only1VersionInIDE *)
+  .pipe(Scala2Rows.allPlatforms(_, scala2Axis, scala2IdeSkip))
   .disablePlugins(WelcomePlugin)
   .settings(
     moduleName := "hearth-better-printers",
@@ -497,7 +508,9 @@ lazy val hearthBetterPrinters = projectMatrix
 
 lazy val hearthCrossQuotes = projectMatrix
   .in(file("hearth-cross-quotes"))
-  .someVariations(versions.scalas, versions.platforms)((defineCrossQuotes ++ only1VersionInIDE) *)
+  .defaultAxes(scala3DefaultAxes: _*)
+  .someVariations(List(versions.scala3), versions.platforms)((defineCrossQuotes ++ only1VersionInIDE) *)
+  .pipe(Scala2Rows.allPlatforms(_, scala2Axis, scala2IdeSkip))
   .enablePlugins(SourceGenPlugin)
   .disablePlugins(WelcomePlugin, MimaPlugin)
   .settings(
@@ -527,7 +540,9 @@ lazy val hearthCrossQuotes = projectMatrix
 
 lazy val hearthMicroFp = projectMatrix
   .in(file("hearth-micro-fp"))
-  .someVariations(versions.scalas, versions.platforms)(only1VersionInIDE *)
+  .defaultAxes(scala3DefaultAxes: _*)
+  .someVariations(List(versions.scala3), versions.platforms)(only1VersionInIDE *)
+  .pipe(Scala2Rows.allPlatforms(_, scala2Axis, scala2IdeSkip))
   .disablePlugins(WelcomePlugin)
   .settings(
     moduleName := "hearth-micro-fp",
@@ -546,7 +561,9 @@ lazy val hearthMicroFp = projectMatrix
 
 lazy val hearth = projectMatrix
   .in(file("hearth"))
-  .someVariations(versions.scalas, versions.platforms)(((only1VersionInIDE ++ useCrossQuotes)) *)
+  .defaultAxes(scala3DefaultAxes: _*)
+  .someVariations(List(versions.scala3), versions.platforms)(((only1VersionInIDE ++ useCrossQuotes)) *)
+  .pipe(Scala2Rows.allPlatforms(_, scala2Axis, scala2IdeSkip, configJvm = scala2CqJvm, configJs = scala2CqJs, configNat = scala2CqNative))
   .enablePlugins(SourceGenPlugin)
   .disablePlugins(WelcomePlugin)
   .settings(
@@ -573,7 +590,9 @@ lazy val hearth = projectMatrix
 
 lazy val hearthMunit = projectMatrix
   .in(file("hearth-munit"))
-  .someVariations(versions.scalas, versions.platforms)(only1VersionInIDE *)
+  .defaultAxes(scala3DefaultAxes: _*)
+  .someVariations(List(versions.scala3), versions.platforms)(only1VersionInIDE *)
+  .pipe(Scala2Rows.allPlatforms(_, scala2Axis, scala2IdeSkip))
   .disablePlugins(WelcomePlugin)
   .settings(
     moduleName := "hearth-munit",
@@ -599,7 +618,9 @@ lazy val hearthMunit = projectMatrix
 
 lazy val hearthTests = projectMatrix
   .in(file("hearth-tests"))
-  .someVariations(versions.scalas, versions.platforms)((only1VersionInIDE ++ useCrossQuotes) *)
+  .defaultAxes(scala3DefaultAxes: _*)
+  .someVariations(List(versions.scala3), versions.platforms)((only1VersionInIDE ++ useCrossQuotes) *)
+  .pipe(Scala2Rows.allPlatforms(_, scala2Axis, scala2IdeSkip, configJvm = scala2CqJvm, configJs = scala2CqJs, configNat = scala2CqNative))
   .enablePlugins(SourceGenPlugin)
   .disablePlugins(WelcomePlugin)
   .settings(
@@ -609,10 +630,8 @@ lazy val hearthTests = projectMatrix
     SourceGenPlugin.autoImport.generateHearthSources := {
       val outDir = (Compile / sourceManaged).value
       val isScala3 = scalaVersion.value.startsWith("3.")
-      // Shared impl gen trait
       val implGen = outDir / "hearth" / "crossquotes" / "CrossCtorInjectionFixturesImplGen.scala"
       ArityGen.writeIfChanged(implGen, CrossCtorTestGen.generate())
-      // Version-specific bridge (one file, different content per Scala version)
       val bridge = outDir / "hearth" / "crossquotes" / "CrossCtorInjectionFixtures.scala"
       val bridgeContent =
         if (isScala3) CrossCtorTestGen.generateScala3Bridge()
@@ -626,19 +645,14 @@ lazy val hearthTests = projectMatrix
       ArityGen.writeIfChanged(spec, CrossCtorTestGen.generateSpec())
       Seq(spec)
     }.taskValue,
-    // Required for Scala 2.13 to test parsing of Scala XML.
     libraryDependencies ++= foldVersion(scalaVersion.value)(
       for3 = Seq(),
       for2_13 = Seq("org.scala-lang.modules" %% "scala-xml" % versions.scalaXml)
     ),
-    // Do not cover Fixtures and FixturesImpl, they are used to test the library, not a part of it.
     coverageExcludedFiles := ".*Fixtures;.*FixturesImpl",
-    // Allow eviction of test-interface for Scala Native - 0.5.11 is backwards compatible with 0.5.8
     evictionErrorLevel := Level.Warn,
     scalacOptions ++= Seq(
-      // To make sure that we are not silently failing on unsupported trees
       "-Xmacro-settings:hearth.betterPrintersShouldFailOnUnsupportedTree=true",
-      // To test parsing of scalacOptions
       "-Xmacro-settings:hearth-tests.primitives.int=1024",
       "-Xmacro-settings:hearth-tests.primitives.long=65536L",
       "-Xmacro-settings:hearth-tests.primitives.float=3.14f",
@@ -646,13 +660,12 @@ lazy val hearthTests = projectMatrix
       "-Xmacro-settings:hearth-tests.primitives.boolean=true",
       "-Xmacro-settings:hearth-tests.primitives.explicit-string=\"hello\"",
       "-Xmacro-settings:hearth-tests.primitives.implicit-string=hello",
-      // Enable MIO scope benchmarking and flame graph generation
       "-Xmacro-settings:hearth.mioBenchmarkScopes=true",
       s"-Xmacro-settings:hearth.mioBenchmarkFlameGraphDir=${crossTarget.value / "flame-graphs"}"
     )
   )
   .settings(settings *)
-  .settings(scalaNewestSettings *)
+  .settings(ltsSourceDirs *)
   .settings(publishSettings *)
   .settings(noPublishSettings *)
   .settings(dependencies *)
@@ -667,12 +680,51 @@ lazy val hearthTests = projectMatrix
   .jvmPlatform(Seq(versions.scala3), jvmOnlySettings)
   .dependsOn(hearth)
   .dependsOn(hearthMunit)
+  // Next-LTS tier: 3.9 regression (LTS axis trick — scalaABIVersion matches hearth's LTS row)
+  .customRow(true, None, Seq(versions.scala3), Seq(tierNextLts, VirtualAxis.jvm)) { p =>
+    p.settings(scalaVersion := versions.scala3NextLts)
+      .settings(noPublishSettings *)
+      .settings(nextLtsSourceDirs *)
+      .settings(
+        ideSkipProject := true, bspEnabled := false, scalafmtOnCompile := false,
+        scalacOptions ++= {
+          val jar = (hearthCrossQuotes.jvm(versions.scala3) / Compile / packageBin).value
+          Seq(s"-Xplugin:${jar.getAbsolutePath}", s"-Jdummy=${jar.lastModified}",
+            s"-P:hearth.cross-quotes:logging=$logCrossQuotes")
+        }
+      )
+      .disablePlugins(MimaPlugin, WelcomePlugin)
+  }
+  // Next-LTS tier: 2.13.18 regression (uses scala2Axis for "2" suffix)
+  .customRow(true, Seq(scala2Axis, tierNextLts, VirtualAxis.jvm), (p: Project) =>
+    p.settings(scalaVersion := versions.scala213NextLts)
+      .settings(noPublishSettings *)
+      .settings(nextLtsSourceDirs *)
+      .settings(ideSkipProject := true, bspEnabled := false, scalafmtOnCompile := false)
+      .disablePlugins(MimaPlugin, WelcomePlugin)
+  )
+  // Next tier: 3.10 forward (no 2.13 — 3.10 drops cross-compilation)
+  .customRow(true, None, Seq(versions.scala3), Seq(tierNext, VirtualAxis.jvm)) { p =>
+    p.settings(scalaVersion := versions.scala3Next)
+      .settings(noPublishSettings *)
+      .settings(nextSourceDirs *)
+      .settings(
+        ideSkipProject := true, bspEnabled := false, scalafmtOnCompile := false,
+        scalacOptions ++= {
+          val jar = (hearthCrossQuotes.jvm(versions.scala3) / Compile / packageBin).value
+          Seq(s"-Xplugin:${jar.getAbsolutePath}", s"-Jdummy=${jar.lastModified}",
+            s"-P:hearth.cross-quotes:logging=$logCrossQuotes")
+        }
+      )
+      .disablePlugins(MimaPlugin, WelcomePlugin)
+  }
 
 // Test cross compilation: 2.13x3
 
 lazy val hearthSandwichExamples213 = projectMatrix
   .in(file("hearth-sandwich-examples-213"))
-  .someVariations(List(versions.scala213), List(VirtualAxis.jvm))()
+  .defaultAxes(scala3DefaultAxes: _*)
+  .pipe(Scala2Rows.jvmOnly(_, scala2Axis, scala2IdeSkip))
   .settings(settings *)
   .settings(publishSettings *)
   .settings(noPublishSettings *)
@@ -685,6 +737,7 @@ lazy val hearthSandwichExamples213 = projectMatrix
 
 lazy val hearthSandwichExamples3 = projectMatrix
   .in(file("hearth-sandwich-examples-3"))
+  .defaultAxes(scala3DefaultAxes: _*)
   .someVariations(List(versions.scala3), List(VirtualAxis.jvm))()
   .settings(settings *)
   .settings(publishSettings *)
@@ -696,12 +749,20 @@ lazy val hearthSandwichExamples3 = projectMatrix
     description := "Tests cases compiled with Scala 3 to test macros in 2.13x3 cross-compilation (non-publishable)"
   )
   .jvmPlatform(Seq(versions.scala3), jvmOnlySettings)
+  // Next-LTS tier: 3.9 sandwich examples (LTS axis trick)
+  .customRow(true, None, Seq(versions.scala3), Seq(tierNextLts, VirtualAxis.jvm)) { p =>
+    p.settings(scalaVersion := versions.scala3NextLts)
+      .settings(noPublishSettings *)
+      .settings(ideSkipProject := true, bspEnabled := false, scalafmtOnCompile := false)
+      .disablePlugins(MimaPlugin, WelcomePlugin)
+  }
 
 lazy val hearthSandwichTests = projectMatrix
   .in(file("hearth-sandwich-tests"))
-  .someVariations(List(versions.scala213, versions.scala3), List(VirtualAxis.jvm))(only1VersionInIDE *)
+  .defaultAxes(scala3DefaultAxes: _*)
+  .someVariations(List(versions.scala3), List(VirtualAxis.jvm))(only1VersionInIDE *)
+  .pipe(Scala2Rows.jvmOnly(_, scala2Axis, scala2IdeSkip))
   .settings(settings *)
-  .settings(scalaNewestSettings *)
   .settings(publishSettings *)
   .settings(noPublishSettings *)
   .settings(dependencies *)
@@ -716,12 +777,21 @@ lazy val hearthSandwichTests = projectMatrix
   .dependsOn(hearthSandwichExamples213 % s"$Test->$Test;$Compile->$Compile")
   .dependsOn(hearthSandwichExamples3 % s"$Test->$Test;$Compile->$Compile")
   .dependsOn(hearthTests % s"$Test->$Test;$Compile->$Compile")
+  // Next-LTS tier: 3.9 sandwich (Scala 3 only — 2.13 can't consume 3.9)
+  .customRow(true, None, Seq(versions.scala3), Seq(tierNextLts, VirtualAxis.jvm)) { p =>
+    p.settings(scalaVersion := versions.scala3NextLts)
+      .settings(noPublishSettings *)
+      .settings(ideSkipProject := true, bspEnabled := false, scalafmtOnCompile := false)
+      .disablePlugins(MimaPlugin, WelcomePlugin)
+  }
 
 // Modules for debugging cross-quotes, better-printers, etc while minimizing the number of code to recompile
 
 lazy val debugHearthBetterPrinters = projectMatrix
   .in(file("debug-hearth-better-printers"))
-  .someVariations(List(versions.scala213, versions.scala3), List(VirtualAxis.jvm))(only1VersionInIDE *)
+  .defaultAxes(scala3DefaultAxes: _*)
+  .someVariations(List(versions.scala3), List(VirtualAxis.jvm))(only1VersionInIDE *)
+  .pipe(Scala2Rows.jvmOnly(_, scala2Axis, scala2IdeSkip))
   .settings(settings *)
   .settings(publishSettings *)
   .settings(noPublishSettings *)
@@ -736,7 +806,9 @@ lazy val debugHearthBetterPrinters = projectMatrix
 
 lazy val debugHearth = projectMatrix
   .in(file("debug-hearth"))
-  .someVariations(List(versions.scala213, versions.scala3), List(VirtualAxis.jvm))(only1VersionInIDE *)
+  .defaultAxes(scala3DefaultAxes: _*)
+  .someVariations(List(versions.scala3), List(VirtualAxis.jvm))(only1VersionInIDE *)
+  .pipe(Scala2Rows.jvmOnly(_, scala2Axis, scala2IdeSkip))
   .settings(settings *)
   .settings(publishSettings *)
   .settings(noPublishSettings *)

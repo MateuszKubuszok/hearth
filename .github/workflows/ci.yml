@@ -80,27 +80,51 @@ jobs:
         scala: ['2_13', '3']
         platform: ['jvm', 'js', 'native']
         jvm: ['temurin:1.11.0.28', 'temurin:1.17.0.15', 'temurin:1.24.0.2', 'temurin:1.25.0.0']
-        test-lastest-scala: ['false', 'true']
-        # Apparently 2.13.16 does not work with JDK 25+ at all
-        #   see: https://docs.scala-lang.org/overviews/jdk-compatibility/overview.html
-        # so for tests on higher JDK, we will use JDK24 as the lastest supported
-        # Scala 3.8+ requires JDK 17 as the minimum version
+        tier: ['lts', 'next-lts', 'next']
+        # Tier rows are JVM-only regression tests, not published.
+        # Next tier is Scala 3 only (no 2.13 cross-compilation).
+        # LTS Scala 3 runs on JDK 11+; tier rows need JDK 17+.
         exclude:
+          # Tier rows are JVM-only
+          - tier: 'next-lts'
+            platform: 'js'
+          - tier: 'next-lts'
+            platform: 'native'
+          - tier: 'next'
+            platform: 'js'
+          - tier: 'next'
+            platform: 'native'
+          # No 2.13 for Next tier (3.10 drops cross-compilation)
+          - tier: 'next'
+            scala: '2_13'
+          # Tier rows need JDK 17+
+          - tier: 'next-lts'
+            jvm: 'temurin:1.11.0.28'
+          - tier: 'next'
+            jvm: 'temurin:1.11.0.28'
+          # LTS excludes (same as before)
           - scala: '2_13'
             jvm: 'temurin:1.25.0.0' # 2.13.16 does not work with JDK 25+
           - scala: '2_13'
             jvm: 'temurin:1.17.0.15' # No need to test 2.13 on JDK 17 separately
           - scala: '3'
-            jvm: 'temurin:1.24.0.2' # Scala 3 we use does not need a workaround
+            tier: 'lts'
+            jvm: 'temurin:1.24.0.2' # Scala 3 LTS does not need a workaround
           - scala: '3'
-            test-lastest-scala: 'true'
-            jvm: 'temurin:1.11.0.28' # Scala 3.8+ requires JDK 17+
-          - scala: '3'
-            test-lastest-scala: 'false'
-            jvm: 'temurin:1.17.0.15' # JDK 17 only needed for newest Scala 3
+            tier: 'lts'
+            jvm: 'temurin:1.17.0.15' # JDK 17 not needed for LTS Scala 3
+          # Avoid redundant tier x JDK combinations
+          - tier: 'next-lts'
+            jvm: 'temurin:1.24.0.2'
+          - tier: 'next-lts'
+            jvm: 'temurin:1.25.0.0'
+          - tier: 'next'
+            jvm: 'temurin:1.24.0.2'
+          - tier: 'next'
+            jvm: 'temurin:1.25.0.0'
       fail-fast: false
 
-    name: "Scala: ${{ matrix.scala == '2_13' && '2.13' || '3' }} / Platform: ${{ matrix.platform }} / JVM: ${{ matrix.jvm }} / Test: ${{ matrix.test-lastest-scala == 'true' && 'Latest' || 'Oldest Supported' }}"
+    name: "Scala: ${{ matrix.scala == '2_13' && '2.13' || '3' }} / Platform: ${{ matrix.platform }} / JVM: ${{ matrix.jvm }} / Tier: ${{ matrix.tier }}"
 
     steps:
       - uses: actions/checkout@v7
@@ -111,10 +135,15 @@ jobs:
         with:
           jvm: ${{ matrix.jvm }}
           apps: sbt
-      - name: "Clean, compile, test${{matrix.platform == 'jvm' && ', generate coverage report, check MiMa' || ''}}"
-        run: sbt ci-${{ matrix.platform }}-${{ matrix.scala }}
-        env:
-          NEWEST_SCALA_TESTS: ${{ matrix.test-lastest-scala }}
+      - name: "Clean, compile, test${{ matrix.tier == 'lts' && matrix.platform == 'jvm' && ', generate coverage report, check MiMa' || '' }}"
+        run: |
+          if [ "${{ matrix.tier }}" = "lts" ]; then
+            sbt ci-${{ matrix.platform }}-${{ matrix.scala }}
+          elif [ "${{ matrix.tier }}" = "next-lts" ]; then
+            sbt quick-test-next-lts
+          elif [ "${{ matrix.tier }}" = "next" ]; then
+            sbt quick-test-next
+          fi
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
