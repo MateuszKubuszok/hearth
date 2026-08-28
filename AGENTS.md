@@ -7,7 +7,7 @@ This document provides guidelines for AI agents (like Claude Code, GitHub Copilo
 **Hearth** is the first Scala macros' standard library, designed to make macro development easier and more maintainable across Scala 2.13 and Scala 3.
 
 - **Language**: Scala (pure Scala library)
-- **Scala Versions**: 2.13.16, 3.3.8 (primary); 2.13.18, 3.8.4 (regression testing)
+- **Scala Versions**: 2.13.16, 3.3.8 (primary/LTS); 2.13.18, 3.9.0 (Next-LTS regression); 3.10.0-RC1 (Next regression)
 - **Platforms**: JVM, Scala.js, Scala Native
 - **Build Tool**: SBT (but see restrictions below)
 - **License**: Apache 2.0
@@ -206,7 +206,7 @@ When making changes:
 The GitHub Actions CI pipeline includes:
 - **Formatting checks** - Scalafmt compliance
 - **Snippet validation** - Scala CLI snippets in docs
-- **Matrix testing** - 2 Scala versions × 3 platforms × 2 JDK versions each
+- **Matrix testing** - 2 Scala LTS versions × 3 platforms × JDK versions, plus regression tiers (JVM-only)
 - **Code coverage** - JVM only
 - **Binary compatibility** - MiMa checks
 
@@ -217,6 +217,8 @@ Agents should:
 - **before reporting that a task is done**, run `sbt --client "quick-clean ; quick-test"` as the final
   verification step — while MCP speeds up the development loop, `sbt --client` compiles and tests across
   both Scala versions and is the more reliable way to confirm a fix
+- **also run regression tiers**: `sbt --client "quick-clean-next-lts ; quick-test-next-lts"` to verify
+  against Scala 3.9 and 2.13.18. The Next tier (3.10) may have known compilation issues — check before running
 
 If an agent was used to generate the code (e.g. following GitHub issue instructions),
 but an agent was not able to run the compilation and tests (e.g. because GitHub sandboxing
@@ -258,15 +260,46 @@ For the complete bug-fix workflow (reproduce → fix → verify), see [Instructi
 
 | What changed | Clean commands |
 |---|---|
-| `hearth-better-printers` | `hearthBetterPrinters/clean ; hearthBetterPrinters3/clean ; hearthCrossQuotes/clean ; hearthCrossQuotes3/clean ; hearth/clean ; hearth3/clean ; quick-clean` |
-| `hearth-cross-quotes` | `hearthCrossQuotes/clean ; hearthCrossQuotes3/clean ; hearth/clean ; hearth3/clean ; quick-clean` |
-| `hearth` | `hearth/clean ; hearth3/clean ; quick-clean` |
+| `hearth-better-printers` | `hearthBetterPrinters/clean ; hearthBetterPrinters2/clean ; hearthCrossQuotes/clean ; hearthCrossQuotes2/clean ; hearth/clean ; hearth2/clean ; quick-clean` |
+| `hearth-cross-quotes` | `hearthCrossQuotes/clean ; hearthCrossQuotes2/clean ; hearth/clean ; hearth2/clean ; quick-clean` |
+| `hearth` | `hearth/clean ; hearth2/clean ; quick-clean` |
 | `hearth-tests` only | `quick-clean` |
 
 **Key reminders:**
 - Always clean after macro changes — incremental compilation does NOT re-expand macros
-- `quick-clean` then `quick-test` is the standard verify cycle
+- `quick-clean` then `quick-test` is the standard LTS verify cycle
+- `quick-clean-next-lts` then `quick-test-next-lts` runs Next-LTS regression (3.9, 2.13.18)
+- `quick-clean-next` then `quick-test-next` runs Next regression (3.10)
 - MCP supports only 1 Scala version at a time — use `sbt --client` for the other version
+
+### Test tier structure
+
+Regression testing uses always-visible sbt subprojects (NOT env vars). Published modules compile
+only at LTS versions (2.13.16 / 3.3.8). Test modules have tier rows that compile at regression
+versions but link against LTS-compiled library artifacts (binary compatible).
+
+| Tier | Scala versions | Project suffix | Purpose |
+|------|---------------|----------------|---------|
+| LTS | 2.13.16 + 3.3.8 | (none) / `2` | Published versions, all platforms |
+| Next-LTS | 2.13.18 + 3.9.0 | `NextLts` / `2NextLts` | Last cross-compiling generation, JVM-only |
+| Next | 3.10.0-RC1 | `Next` | Forward-looking, no 2.13, JVM-only |
+
+**Project naming convention:** Scala 3 is the default (no suffix). Scala 2.13 gets the `2` suffix.
+Examples: `hearth` = Scala 3, `hearth2` = Scala 2.13, `hearthTestsNextLts` = tests at 3.9.
+
+### Test source directory convention (hearth-tests)
+
+| Directory | LTS | Next-LTS | Next | Description |
+|-----------|:---:|:--------:|:----:|-------------|
+| `scala/` | ✓ | ✓ | ✓ | Universal (all versions) |
+| `scala-2/` | ✓ | ✓ | — | Scala 2 only |
+| `scala-3/` | ✓ | ✓ | ✓ | Universal Scala 3 (must compile on ALL 3.x) |
+| `scala-lts*` | ✓ | ✓ | — | Cross-compatible range only (not 3.10+) |
+| `scala-next-lts*` | — | ✓ | — | Post-LTS features (2.13.17+ / 3.4–3.9) |
+| `scala-next*` | — | — | ✓ | 3.10+ only |
+
+When 3.10 deprecation forces splitting code out of `scala-3/`, move the old-syntax version
+to `scala-lts-3/` and put the new-syntax version in `scala-next-3/`.
 
 ## Key API patterns
 
@@ -308,7 +341,7 @@ The `Method` API has a layered architecture with platform-specific untyped code 
 **Cross-platform considerations:**
 - `isPrivate`/`isProtected` are normalized: `private[pkg]` → `isPrivate=false`, `privateWithin=Some("pkg")`
 - Type rendering must produce identical output on Scala 2 and 3 (no `LanguageVersion` conditionals in tests)
-- Scala 3 has clause interleaving; Scala 2 does not — this is tested in `scala-newest-3` only
+- Scala 3 has clause interleaving; Scala 2 does not — this is tested in `scala-next-lts-3` only
 - `isOverride` differs for `java.lang.Object` methods: `true` on Scala 2 (overrides from `Any`), `false` on Scala 3 (root class)
 
 ### AnonymousInstance architecture
