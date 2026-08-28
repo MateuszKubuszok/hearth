@@ -1357,7 +1357,7 @@ final class TypesSpec extends MacroSuite {
             "=:=" -> Data(true)
           )
           @scala.annotation.unused
-          type Byte1 = 1 with Byte // force treating it as Byte literal type
+          type Byte1 = 1 & Byte // force treating it as Byte literal type
           testComparisons[Byte, Byte1] <==> Data.map(
             "<:<" -> Data(false),
             "=:=" -> Data(false)
@@ -1372,7 +1372,7 @@ final class TypesSpec extends MacroSuite {
             "=:=" -> Data(true)
           )
           @scala.annotation.unused
-          type Short1 = 1 with Short // force treating it as Short literal type
+          type Short1 = 1 & Short // force treating it as Short literal type
           testComparisons[Short, Short1] <==> Data.map(
             "<:<" -> Data(false),
             "=:=" -> Data(false)
