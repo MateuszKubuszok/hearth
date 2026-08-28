@@ -115,13 +115,13 @@ val useCrossQuotes = List(
 // Scala 2 cross-quotes wiring per platform (passed to scala2Rows configure callbacks).
 def scala2CqJvm(p: Project): Project =
   p.dependsOn(hearthCrossQuotes.jvm(versions.scala213))
-   .settings(scalacOptions += s"-Xmacro-settings:hearth.cross-quotes.logging=$logCrossQuotes")
+    .settings(scalacOptions += s"-Xmacro-settings:hearth.cross-quotes.logging=$logCrossQuotes")
 def scala2CqJs(p: Project): Project =
   p.dependsOn(hearthCrossQuotes.js(versions.scala213))
-   .settings(scalacOptions += s"-Xmacro-settings:hearth.cross-quotes.logging=$logCrossQuotes")
+    .settings(scalacOptions += s"-Xmacro-settings:hearth.cross-quotes.logging=$logCrossQuotes")
 def scala2CqNative(p: Project): Project =
   p.dependsOn(hearthCrossQuotes.native(versions.scala213))
-   .settings(scalacOptions += s"-Xmacro-settings:hearth.cross-quotes.logging=$logCrossQuotes")
+    .settings(scalacOptions += s"-Xmacro-settings:hearth.cross-quotes.logging=$logCrossQuotes")
 
 val settings = Seq(
   scalacOptions ++= {
@@ -211,7 +211,7 @@ val jvmOnlySettings = Seq(
 
 // Source directory settings for each test tier. LTS rows include scala-lts* dirs (shared with Next-LTS).
 // Next-LTS rows additionally include scala-next-lts* dirs. Next rows include scala-next* dirs only.
-def tierSourceDirs(tiers: String*): Seq[Setting[_]] = {
+def tierSourceDirs(tiers: String*): Seq[Setting[?]] = {
   def resolveDirs(srcDir: java.nio.file.Path, scope: String, sv: String): Seq[File] =
     tiers.flatMap { tier =>
       Seq(srcDir.resolve(s"$scope/scala-$tier").toFile) ++
@@ -226,9 +226,9 @@ def tierSourceDirs(tiers: String*): Seq[Setting[_]] = {
   )
 }
 
-val ltsSourceDirs: Seq[Setting[_]] = tierSourceDirs("lts")
-val nextLtsSourceDirs: Seq[Setting[_]] = tierSourceDirs("lts", "next-lts")
-val nextSourceDirs: Seq[Setting[_]] = tierSourceDirs("next")
+val ltsSourceDirs: Seq[Setting[?]] = tierSourceDirs("lts")
+val nextLtsSourceDirs: Seq[Setting[?]] = tierSourceDirs("lts", "next-lts")
+val nextSourceDirs: Seq[Setting[?]] = tierSourceDirs("next")
 
 val dependencies = Seq(
   libraryDependencies ++= Seq(
@@ -400,6 +400,16 @@ lazy val al = new Aliases(
   published = Seq(hearthBetterPrinters, hearthCrossQuotes, hearthMicroFp, hearth, hearthMunit),
   testOnly = Seq(hearthTests, hearthSandwichTests)
 ) {
+  private def isTierRow(id: String): Boolean =
+    id.contains("NextLts") || id.endsWith("Next")
+
+  override protected def projectIds(
+      matrices: Seq[sbt.internal.ProjectMatrix],
+      platform: String,
+      scalaBinary: String
+  ): Vector[String] =
+    super.projectIds(matrices, platform, scalaBinary).filterNot(isTierRow)
+
   override def ci(platform: String, scalaBinary: String): String = {
     val base = super.ci(platform, scalaBinary)
     val mimaIds = projectIds(published, platform, scalaBinary)
@@ -563,7 +573,16 @@ lazy val hearth = projectMatrix
   .in(file("hearth"))
   .defaultAxes(scala3DefaultAxes: _*)
   .someVariations(List(versions.scala3), versions.platforms)(((only1VersionInIDE ++ useCrossQuotes)) *)
-  .pipe(Scala2Rows.allPlatforms(_, scala2Axis, scala2IdeSkip, configJvm = scala2CqJvm, configJs = scala2CqJs, configNat = scala2CqNative))
+  .pipe(
+    Scala2Rows.allPlatforms(
+      _,
+      scala2Axis,
+      scala2IdeSkip,
+      configJvm = scala2CqJvm,
+      configJs = scala2CqJs,
+      configNat = scala2CqNative
+    )
+  )
   .enablePlugins(SourceGenPlugin)
   .disablePlugins(WelcomePlugin)
   .settings(
@@ -620,7 +639,16 @@ lazy val hearthTests = projectMatrix
   .in(file("hearth-tests"))
   .defaultAxes(scala3DefaultAxes: _*)
   .someVariations(List(versions.scala3), versions.platforms)((only1VersionInIDE ++ useCrossQuotes) *)
-  .pipe(Scala2Rows.allPlatforms(_, scala2Axis, scala2IdeSkip, configJvm = scala2CqJvm, configJs = scala2CqJs, configNat = scala2CqNative))
+  .pipe(
+    Scala2Rows.allPlatforms(
+      _,
+      scala2Axis,
+      scala2IdeSkip,
+      configJvm = scala2CqJvm,
+      configJs = scala2CqJs,
+      configNat = scala2CqNative
+    )
+  )
   .enablePlugins(SourceGenPlugin)
   .disablePlugins(WelcomePlugin)
   .settings(
@@ -686,22 +714,30 @@ lazy val hearthTests = projectMatrix
       .settings(noPublishSettings *)
       .settings(nextLtsSourceDirs *)
       .settings(
-        ideSkipProject := true, bspEnabled := false, scalafmtOnCompile := false,
+        ideSkipProject := true,
+        bspEnabled := false,
+        scalafmtOnCompile := false,
         scalacOptions ++= {
           val jar = (hearthCrossQuotes.jvm(versions.scala3) / Compile / packageBin).value
-          Seq(s"-Xplugin:${jar.getAbsolutePath}", s"-Jdummy=${jar.lastModified}",
-            s"-P:hearth.cross-quotes:logging=$logCrossQuotes")
+          Seq(
+            s"-Xplugin:${jar.getAbsolutePath}",
+            s"-Jdummy=${jar.lastModified}",
+            s"-P:hearth.cross-quotes:logging=$logCrossQuotes"
+          )
         }
       )
       .disablePlugins(MimaPlugin, WelcomePlugin)
   }
   // Next-LTS tier: 2.13.18 regression (uses scala2Axis for "2" suffix)
-  .customRow(true, Seq(scala2Axis, tierNextLts, VirtualAxis.jvm), (p: Project) =>
-    p.settings(scalaVersion := versions.scala213NextLts)
-      .settings(noPublishSettings *)
-      .settings(nextLtsSourceDirs *)
-      .settings(ideSkipProject := true, bspEnabled := false, scalafmtOnCompile := false)
-      .disablePlugins(MimaPlugin, WelcomePlugin)
+  .customRow(
+    true,
+    Seq(scala2Axis, tierNextLts, VirtualAxis.jvm),
+    (p: Project) =>
+      p.settings(scalaVersion := versions.scala213NextLts)
+        .settings(noPublishSettings *)
+        .settings(nextLtsSourceDirs *)
+        .settings(ideSkipProject := true, bspEnabled := false, scalafmtOnCompile := false)
+        .disablePlugins(MimaPlugin, WelcomePlugin)
   )
   // Next tier: 3.10 forward (no 2.13 — 3.10 drops cross-compilation)
   .customRow(true, None, Seq(versions.scala3), Seq(tierNext, VirtualAxis.jvm)) { p =>
@@ -709,11 +745,16 @@ lazy val hearthTests = projectMatrix
       .settings(noPublishSettings *)
       .settings(nextSourceDirs *)
       .settings(
-        ideSkipProject := true, bspEnabled := false, scalafmtOnCompile := false,
+        ideSkipProject := true,
+        bspEnabled := false,
+        scalafmtOnCompile := false,
         scalacOptions ++= {
           val jar = (hearthCrossQuotes.jvm(versions.scala3) / Compile / packageBin).value
-          Seq(s"-Xplugin:${jar.getAbsolutePath}", s"-Jdummy=${jar.lastModified}",
-            s"-P:hearth.cross-quotes:logging=$logCrossQuotes")
+          Seq(
+            s"-Xplugin:${jar.getAbsolutePath}",
+            s"-Jdummy=${jar.lastModified}",
+            s"-P:hearth.cross-quotes:logging=$logCrossQuotes"
+          )
         }
       )
       .disablePlugins(MimaPlugin, WelcomePlugin)

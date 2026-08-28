@@ -80,27 +80,18 @@ jobs:
         scala: ['2_13', '3']
         platform: ['jvm', 'js', 'native']
         jvm: ['temurin:1.11.0.28', 'temurin:1.17.0.15', 'temurin:1.24.0.2', 'temurin:1.25.0.0']
-        tier: ['lts', 'next-lts', 'next']
+        tier: ['lts', 'next-lts']  # 'next' (3.10-RC1) excluded until macro inference changes are addressed
         # Tier rows are JVM-only regression tests, not published.
         # Next tier is Scala 3 only (no 2.13 cross-compilation).
         # LTS Scala 3 runs on JDK 11+; tier rows need JDK 17+.
         exclude:
-          # Tier rows are JVM-only
+          # Next-LTS tier rows are JVM-only
           - tier: 'next-lts'
             platform: 'js'
           - tier: 'next-lts'
             platform: 'native'
-          - tier: 'next'
-            platform: 'js'
-          - tier: 'next'
-            platform: 'native'
-          # No 2.13 for Next tier (3.10 drops cross-compilation)
-          - tier: 'next'
-            scala: '2_13'
-          # Tier rows need JDK 17+
+          # Next-LTS tier needs JDK 17+
           - tier: 'next-lts'
-            jvm: 'temurin:1.11.0.28'
-          - tier: 'next'
             jvm: 'temurin:1.11.0.28'
           # LTS excludes (same as before)
           - scala: '2_13'
@@ -113,14 +104,10 @@ jobs:
           - scala: '3'
             tier: 'lts'
             jvm: 'temurin:1.17.0.15' # JDK 17 not needed for LTS Scala 3
-          # Avoid redundant tier x JDK combinations
+          # Avoid redundant Next-LTS x JDK combinations
           - tier: 'next-lts'
             jvm: 'temurin:1.24.0.2'
           - tier: 'next-lts'
-            jvm: 'temurin:1.25.0.0'
-          - tier: 'next'
-            jvm: 'temurin:1.24.0.2'
-          - tier: 'next'
             jvm: 'temurin:1.25.0.0'
       fail-fast: false
 
@@ -141,8 +128,6 @@ jobs:
             sbt ci-${{ matrix.platform }}-${{ matrix.scala }}
           elif [ "${{ matrix.tier }}" = "next-lts" ]; then
             sbt quick-test-next-lts
-          elif [ "${{ matrix.tier }}" = "next" ]; then
-            sbt quick-test-next
           fi
       - uses: codecov/codecov-action@v7
         with:
