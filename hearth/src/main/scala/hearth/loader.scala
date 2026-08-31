@@ -110,9 +110,13 @@ private[hearth] object platformSpecificServiceLoader extends platformSpecificSer
   // Caches previous results within the same compilation ClassLoader.
   //
   // Keying on ClassLoader (not Class) provides correct cache scoping: all services loaded from the
-  // same compilation ClassLoader share one cache entry, and the WeakHashMap allows cleanup when the
-  // ClassLoader is GC'd between compilation units. String class names are used as inner keys since
-  // they are stable and won't be collected.
+  // same compilation ClassLoader share one cache entry. String class names are used as inner keys
+  // since they are stable and won't be collected.
+  //
+  // WeakHashMap alone does NOT prevent metaspace leaks here: the cached values (ServiceLoader,
+  // extension instances) hold strong references back to the ClassLoader key, so the WeakReference
+  // is never enqueued. Instead, we clear the map when a new ClassLoader appears — stale entries
+  // keyed by a previous ClassLoader can never be reused anyway. See #377.
 
   private val serviceLoadersByClassLoader =
     new java.util.WeakHashMap[ClassLoader, java.util.HashMap[String, Tried[ServiceLoader[?]]]]()
@@ -120,6 +124,7 @@ private[hearth] object platformSpecificServiceLoader extends platformSpecificSer
   private def getServiceLoader[T](clazz: Class[T], classLoader: ClassLoader): Tried[ServiceLoader[T]] = {
     var inner = serviceLoadersByClassLoader.get(classLoader)
     if (inner == null) {
+      serviceLoadersByClassLoader.clear()
       inner = new java.util.HashMap()
       serviceLoadersByClassLoader.put(classLoader, inner): Unit
     }
@@ -139,6 +144,7 @@ private[hearth] object platformSpecificServiceLoader extends platformSpecificSer
   private def getService[T](classLoader: ClassLoader, provider: ServiceLoader.Provider[T]): Tried[T] = {
     var inner = servicesByClassLoader.get(classLoader)
     if (inner == null) {
+      servicesByClassLoader.clear()
       inner = new java.util.HashMap()
       servicesByClassLoader.put(classLoader, inner): Unit
     }
